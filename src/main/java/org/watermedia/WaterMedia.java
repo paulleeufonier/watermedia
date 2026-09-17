@@ -84,10 +84,10 @@ public class WaterMedia {
 		LOGGER.info(IT, "Are you ready for trouble?");
 	}
 
-	public static ILoader getLoader() { return bootstrap; }
+	public static ILoader getLoader() { return bootstrap != null ? bootstrap : ILoader.DEFAULT; }
 
 	public static Path getConfigDir() {
-		return bootstrap.processDir().resolve("config/watermedia");
+		return getLoader().processDir().resolve("config/watermedia");
 	}
 
     /**

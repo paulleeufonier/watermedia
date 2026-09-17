@@ -36,13 +36,24 @@ public class TwitchAPI {
         return StreamQuality.parse(performGetRequest(apiUrl));
     }
 
-    // BUSTED
-    private static String buildApiUrl(String id, boolean isVOD) throws IOException {
+    private static String buildApiUrl(String id, boolean isVOD) throws IOException, StreamNotFound {
         JsonElement response = post(id, isVOD);
-        JsonObject accessTokenData = response
-                .getAsJsonObject().get("data")
-                .getAsJsonObject().get(isVOD ? "videoPlaybackAccessToken" : "streamPlaybackAccessToken")
-                .getAsJsonObject();
+        if (response == null || !response.isJsonObject()) {
+            throw new StreamNotFound("Invalid Twitch GQL response");
+        }
+        JsonObject root = response.getAsJsonObject();
+        if (!root.has("data") || root.get("data").isJsonNull()) {
+            throw new StreamNotFound("Twitch GQL returned no data: " + root);
+        }
+        JsonObject data = root.getAsJsonObject("data");
+        String tokenKey = isVOD ? "videoPlaybackAccessToken" : "streamPlaybackAccessToken";
+        if (!data.has(tokenKey) || data.get(tokenKey).isJsonNull()) {
+            throw new StreamNotFound("Twitch stream/VOD not found or access token unavailable for: " + id);
+        }
+        JsonObject accessTokenData = data.getAsJsonObject(tokenKey);
+        if (!accessTokenData.has("signature") || !accessTokenData.has("value")) {
+            throw new StreamNotFound("Twitch access token missing signature or value for: " + id);
+        }
 
         String signature = accessTokenData.get("signature").getAsString();
         String value = accessTokenData.get("value").getAsString();
@@ -58,26 +69,35 @@ public class TwitchAPI {
 
     private static String performGetRequest(String apiUrl) throws IOException, StreamNotFound {
         HttpURLConnection conn = initializeConnection(apiUrl, "GET");
+        conn.setRequestProperty("User-Agent", NetTool.USER_AGENT);
+        conn.setRequestProperty("Referer", "https://www.twitch.tv/");
+        conn.setRequestProperty("Origin", "https://www.twitch.tv");
         conn.setRequestProperty("x-donate-to", "https://ttv.lol/donate");
 
         int responseCode = conn.getResponseCode();
         if (responseCode == HttpURLConnection.HTTP_NOT_FOUND) throw new StreamNotFound("Stream not found");
         return (responseCode == HttpURLConnection.HTTP_OK) ?
-                new String(readAllBytes(conn.getInputStream())) :
-                new String(readAllBytes(conn.getErrorStream()));
+                new String(readAllBytes(conn.getInputStream()), StandardCharsets.UTF_8) :
+                new String(readAllBytes(conn.getErrorStream()), StandardCharsets.UTF_8);
     }
 
     private static JsonElement post(String id, boolean isVOD) throws IOException {
         HttpURLConnection conn = NetTool.connectToHTTP(GRAPH_QL_URL, "POST");
         conn.setDoOutput(true);
         conn.setRequestProperty("Client-ID", CLIENT_ID);
-        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+        conn.setRequestProperty("Content-Type", "text/plain;charset=UTF-8");
+        conn.setRequestProperty("Origin", "https://www.twitch.tv");
+        conn.setRequestProperty("Referer", "https://www.twitch.tv/");
+        conn.setRequestProperty("User-Agent", NetTool.USER_AGENT);
 
         try (OutputStream os = conn.getOutputStream()) {
             os.write(buildJsonString(id, isVOD).getBytes(StandardCharsets.UTF_8));
         }
 
-        return new JsonParser().parse(new String(readAllBytes(conn.getInputStream())));
+        int code = conn.getResponseCode();
+        InputStream stream = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+        if (stream == null) throw new IOException("Twitch GQL HTTP " + code + " with null stream");
+        return new JsonParser().parse(new String(readAllBytes(stream), StandardCharsets.UTF_8));
     }
 
     /**
@@ -112,7 +132,7 @@ public class TwitchAPI {
         // Main JSON mapping
         Map<String, Object> jsonMap = new HashMap<>();
         jsonMap.put("operationName", "PlaybackAccessToken_Template");
-        jsonMap.put("query", "query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) {  streamPlaybackAccessToken(channelName: $login, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isLive) {    value    signature    __typename  }  videoPlaybackAccessToken(id: $vodID, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isVod) {    value    signature    __typename  }}");
+        jsonMap.put("query", "query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) {  streamPlaybackAccessToken(channelName: $login, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isLive) {    value    signature    authorization { isForbidden forbiddenReasonCode }    __typename  }  videoPlaybackAccessToken(id: $vodID, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isVod) {    value    signature    __typename  }}");
         jsonMap.put("variables", variables);
 
         return gson.toJson(jsonMap);

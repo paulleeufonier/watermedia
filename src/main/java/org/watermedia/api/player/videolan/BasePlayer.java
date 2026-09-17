@@ -46,6 +46,7 @@ public abstract class BasePlayer {
     // PLAYER THREAD
     protected boolean live = false;
     protected ReentrantLock lock = new ReentrantLock();
+    protected AbstractPatch.Result lastResult;
 
     protected BasePlayer(MediaPlayerFactory factory, RenderCallback renderCallback, BufferFormatCallback bufferFormatCallback, BufferCleanupCallback cleanupCallback) {
         this.init(factory, renderCallback, bufferFormatCallback, cleanupCallback);
@@ -83,6 +84,7 @@ public abstract class BasePlayer {
             AbstractPatch.Result result = NetworkAPI.patch(url);
             if (result == null) throw new IllegalArgumentException("Invalid URL");
 
+            this.lastResult = result;
             this.url = result.uri;
             this.live = result.assumeStream;
             return true;
@@ -94,27 +96,55 @@ public abstract class BasePlayer {
 
     public void start(URI url) { this.start(url, new String[0]); }
     public void start(URI url, String[] vlcArgs) {
+        if (url != null) {
+            String host = url.getHost();
+            String path = url.getPath();
+            if ((host != null && (host.contains("twitch") || host.contains("kick") || host.contains("ttvnw") || host.contains("live-video")))
+                    || (path != null && path.contains(".m3u8"))) {
+                this.live = true;
+            }
+        }
         ThreadTool.thread(() -> {
             this.lock.lock();
-            if (rpa(url)) {
-                raw.mediaPlayer().media().play(this.url, vlcArgs);
+            try {
+                if (rpa(url)) {
+                    String[] args = (lastResult != null && lastResult.extraOptions != null && lastResult.extraOptions.length > 0)
+                            ? org.watermedia.core.tools.DataTool.concat(vlcArgs, lastResult.extraOptions)
+                            : vlcArgs;
+                    raw.mediaPlayer().media().play(this.url, args);
+                }
+            } finally {
+                this.lock.unlock();
             }
-            this.lock.unlock();
         });
     }
 
     public void startPaused(URI url) { this.startPaused(url, new String[0]); }
     public void startPaused(URI url, String[] vlcArgs) {
-        final String[] args = new String[vlcArgs.length + 1];
-        System.arraycopy(vlcArgs, 0, args, 0, vlcArgs.length);
-        args[vlcArgs.length] = "start-paused"; // pause on start
+        if (url != null) {
+            String host = url.getHost();
+            String path = url.getPath();
+            if ((host != null && (host.contains("twitch") || host.contains("kick") || host.contains("ttvnw") || host.contains("live-video")))
+                    || (path != null && path.contains(".m3u8"))) {
+                this.live = true;
+            }
+        }
+        final String[] baseArgs = new String[vlcArgs.length + 1];
+        System.arraycopy(vlcArgs, 0, baseArgs, 0, vlcArgs.length);
+        baseArgs[vlcArgs.length] = "start-paused"; // pause on start
 
         ThreadTool.thread(() -> {
             this.lock.lock();
-            if (rpa(url)) {
-                raw.mediaPlayer().media().play(this.url, args);
+            try {
+                if (rpa(url)) {
+                    String[] args = (lastResult != null && lastResult.extraOptions != null && lastResult.extraOptions.length > 0)
+                            ? org.watermedia.core.tools.DataTool.concat(baseArgs, lastResult.extraOptions)
+                            : baseArgs;
+                    raw.mediaPlayer().media().play(this.url, args);
+                }
+            } finally {
+                this.lock.unlock();
             }
-            this.lock.unlock();
         });
     }
 
@@ -212,39 +242,52 @@ public abstract class BasePlayer {
     }
 
     /**
-     * Method is currently incomplete
-     * it cannot be distingué if was a stream after get media information
-     * that is supplied with our API but isn't enough, because another type of streams cannot be handled
+     * Checks if current media is a livestream.
+     * Accurately recognizes Twitch, Kick, and .m3u8 live playlists
      * @return if mrl was a livestream
      */
     public boolean isLive() {
         if (live) return true;
-        // TODO: made a M3U8 headers reader, VLC can't provide this information
-//        if (url.getPath().endsWith(".m3u8") || url.getPath().endsWith(".m3u")) {
-//            if (getMediaInfoDuration() == -1) return true;
-//            if (getTime() > getDuration()) return true;
-//        }
 
-        InfoApi info = raw.mediaPlayer().media().info();
-        if (info != null) {
-            return info.type().equals(MediaType.STREAM);
+        if (this.url != null) {
+            String path = this.url.getPath();
+            if (path != null && (path.endsWith(".m3u8") || path.endsWith(".m3u") || path.contains(".m3u8"))) {
+                return true;
+            }
+            String host = this.url.getHost();
+            if (host != null && (host.contains("ttvnw.net") || host.contains("live-video.net") || host.contains("twitch") || host.contains("kick"))) {
+                return true;
+            }
+        }
+
+        if (raw != null) {
+            try {
+                InfoApi info = raw.mediaPlayer().media().info();
+                if (info != null) {
+                    if (info.type().equals(MediaType.STREAM)) return true;
+                    if (info.duration() <= 0 && (isPlaying() || isBuffering())) {
+                        return true;
+                    }
+                }
+            } catch (Exception ignored) {}
         }
 
         return false;
     }
 
     public boolean isSeekAble() {
+        if (isLive()) return false;
         if (raw == null) return false;
         return raw.mediaPlayer().status().isSeekable();
     }
 
     public void seekTo(long time) {
-        if (raw == null) return;
+        if (raw == null || isLive()) return;
         raw.mediaPlayer().controls().setTime(time);
     }
 
     public void seekFastTo(long ticks) {
-        if (raw == null) return;
+        if (raw == null || isLive()) return;
         raw.mediaPlayer().controls().setTime(ticks);
     }
 
@@ -382,9 +425,12 @@ public abstract class BasePlayer {
                 if (volume == 0 && !mediaPlayer.audio().isMute()) mediaPlayer.audio().setMute(true);
                 else if (volume > 0 && mediaPlayer.audio().isMute()) mediaPlayer.audio().setMute(false);
 
-                if (mediaPlayer.media().info().duration() < 500) {
-                    mediaPlayer.controls().pause();
-                }
+                try {
+                    InfoApi info = mediaPlayer.media().info();
+                    if (info != null && !info.type().equals(MediaType.STREAM) && info.duration() > 0 && info.duration() < 500) {
+                        mediaPlayer.controls().pause();
+                    }
+                } catch (Exception ignored) {}
             });
         }
     }

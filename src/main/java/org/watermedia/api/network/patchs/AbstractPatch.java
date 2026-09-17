@@ -81,8 +81,15 @@ public abstract class AbstractPatch {
             this.fallbackResult = fallback;
         }
 
+        public String[] extraOptions;
+
         public Result setAudioTrack(URI url) {
             this.audioUrl = url;
+            return this;
+        }
+
+        public Result setExtraOptions(String... options) {
+            this.extraOptions = options;
             return this;
         }
 
